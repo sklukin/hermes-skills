@@ -1,7 +1,7 @@
 ---
 name: adaptive-training-coach
 description: "Вести тренировки, отчёты и безопасную прогрессию."
-version: 1.0.2
+version: 1.0.3
 author: Sergey Klyukin (sklukin), Hermes Agent
 license: MIT
 platforms: [linux]
@@ -34,8 +34,8 @@ metadata:
 
 Используй SQLite как обязательный постоянный источник данных этого skill. База находится в
 `$HERMES_HOME/data/adaptive-training-coach/training.db`; если `HERMES_HOME` не задан, путь
-начинается с `~/.hermes`. Полная схема, связи, ограничения и соответствие команд таблицам
-описаны в `references/database-schema.md`.
+начинается с `~/.hermes`. Исполняемая схема БД находится в `scripts/schema.sql`; связи,
+инварианты и соответствие команд таблицам описаны в `references/database-schema.md`.
 
 Сохраняй в SQLite сразу после подтверждения владельцем:
 
@@ -280,7 +280,7 @@ python3 <skill_dir>/scripts/training_log.py export
 После первоначальной настройки убедись, что:
 
 - `init` вернул путь к SQLite-базе и `schema_version: 1`;
-- схема базы соответствует `references/database-schema.md`;
+- схема базы создана из `scripts/schema.sql` и соответствует `references/database-schema.md`;
 - профиль содержит цель, расписание, часовой пояс и отметку о проверке безопасности;
 - программа подтверждена пользователем;
 - создано только согласованное число напоминаний;

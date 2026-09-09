@@ -106,9 +106,15 @@ class TrainingLogTests(unittest.TestCase):
         self.assertEqual(version, 1)
         reference = SCRIPT.parent.parent / "references" / "database-schema.md"
         documented = reference.read_text(encoding="utf-8")
+        schema_sql = SCRIPT.with_name("schema.sql").read_text(encoding="utf-8")
+        implementation = SCRIPT.read_text(encoding="utf-8")
         for table in expected:
-            self.assertIn(f"CREATE TABLE IF NOT EXISTS {table} (", documented)
-        self.assertIn("PRAGMA user_version = 1;", documented)
+            self.assertIn(f"CREATE TABLE IF NOT EXISTS {table} (", schema_sql)
+        self.assertNotIn("CREATE TABLE", implementation)
+        self.assertNotIn("CREATE TABLE IF NOT EXISTS profile (", documented)
+        self.assertNotIn("```sql", documented)
+        self.assertIn("scripts/schema.sql", documented)
+        self.assertIn('SCHEMA_FILE = Path(__file__).with_name("schema.sql")', implementation)
         with sqlite3.connect(db) as connection:
             connection.execute("PRAGMA user_version = 2")
         rejected = self.run_cli("init", success=False)
