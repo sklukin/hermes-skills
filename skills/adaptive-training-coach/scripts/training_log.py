@@ -246,6 +246,12 @@ def connect(db_path: Path) -> sqlite3.Connection:
     db_path.chmod(0o600)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if current_version > 1:
+        conn.close()
+        raise ValueError(
+            f"Database schema version {current_version} is newer than supported version 1"
+        )
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS profile (
@@ -368,6 +374,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_checkins_date ON checkins(date);
         """
     )
+    if current_version == 0:
+        conn.execute("PRAGMA user_version = 1")
     conn.commit()
     return conn
 
@@ -899,7 +907,8 @@ def main() -> int:
         db_path = ensure_safe_path(args.db, "--db")
         conn = connect(db_path)
         if args.command == "init":
-            result: dict[str, Any] = {"db": str(db_path)}
+            schema_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            result: dict[str, Any] = {"db": str(db_path), "schema_version": schema_version}
         elif args.command == "profile":
             result = {"profile": upsert_profile(conn, load_payload(args.json_file))}
         elif args.command == "profile-show":

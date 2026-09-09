@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -87,6 +88,31 @@ class TrainingLogTests(unittest.TestCase):
         out = Path(result["directory"])
         self.assertEqual(stat.S_IMODE(out.stat().st_mode), 0o700)
         self.assertTrue(all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in out.glob("*.csv")))
+
+    def test_documented_sqlite_schema(self) -> None:
+        initialized = self.run_cli("init")
+        self.assertEqual(initialized["schema_version"], 1)
+        db = Path(initialized["db"])
+        expected = {"profile", "schedule", "sessions", "exercises", "exercise_sets", "checkins"}
+        with sqlite3.connect(db) as connection:
+            actual = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )
+            }
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(actual, expected)
+        self.assertEqual(version, 1)
+        reference = SCRIPT.parent.parent / "references" / "database-schema.md"
+        documented = reference.read_text(encoding="utf-8")
+        for table in expected:
+            self.assertIn(f"CREATE TABLE IF NOT EXISTS {table} (", documented)
+        self.assertIn("PRAGMA user_version = 1;", documented)
+        with sqlite3.connect(db) as connection:
+            connection.execute("PRAGMA user_version = 2")
+        rejected = self.run_cli("init", success=False)
+        self.assertIn("newer than supported version 1", rejected["error"])
 
     def test_strict_profile_and_schedule_updates(self) -> None:
         result = self.run_cli(
