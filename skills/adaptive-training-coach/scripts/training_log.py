@@ -10,9 +10,10 @@ import os
 import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 DEFAULT_DIR = HERMES_HOME / "data" / "adaptive-training-coach"
@@ -130,6 +131,19 @@ RATING_FIELDS = {
     "energy",
     "soreness",
 }
+NONNEGATIVE_FIELDS = {
+    "session_minutes",
+    "duration_min",
+    "total_reps",
+    "distance_m",
+    "reps",
+    "load_kg",
+    "duration_seconds",
+    "speed_kmh",
+    "heart_rate_avg_bpm",
+    "heart_rate_end_bpm",
+    "sleep_hours",
+}
 
 
 def utc_now() -> str:
@@ -165,6 +179,19 @@ def validate_ratings(payload: dict[str, Any]) -> None:
                 raise ValueError(f"{key} must be from 0 to 10")
 
 
+def validate_nonnegative(payload: dict[str, Any]) -> None:
+    for key, value in payload.items():
+        if key in NONNEGATIVE_FIELDS and value is not None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} must be a non-negative number") from exc
+            if number < 0:
+                raise ValueError(f"{key} must be a non-negative number")
+    if payload.get("set_number") is not None and int(payload["set_number"]) < 1:
+        raise ValueError("set_number must be at least 1")
+
+
 def as_bool(value: Any, field: str) -> int:
     if isinstance(value, bool):
         return int(value)
@@ -182,9 +209,41 @@ def validate_date(value: Any, field: str = "date") -> None:
         raise ValueError(f"{field} must use YYYY-MM-DD format") from exc
 
 
+def validate_timezone(value: Any, field: str = "timezone") -> None:
+    if value in (None, ""):
+        return
+    try:
+        ZoneInfo(str(value))
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"{field} must be an IANA timezone") from exc
+
+
+def ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
+def ensure_safe_path(path: Path, field: str) -> Path:
+    root = DEFAULT_DIR.expanduser().resolve()
+    resolved = path.expanduser().resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f"{field} must stay inside {root}")
+    return resolved
+
+
+def report_window(conn: sqlite3.Connection, days: int) -> tuple[str, str]:
+    if days < 1:
+        raise ValueError("days must be at least 1")
+    row = conn.execute("SELECT timezone FROM profile WHERE id=1").fetchone()
+    timezone_name = row["timezone"] if row and row["timezone"] else None
+    today = datetime.now(ZoneInfo(timezone_name)).date() if timezone_name else datetime.now().astimezone().date()
+    return (today - timedelta(days=days - 1)).isoformat(), today.isoformat()
+
+
 def connect(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(db_path.parent)
     conn = sqlite3.connect(db_path)
+    db_path.chmod(0o600)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(
@@ -318,11 +377,14 @@ def filtered(payload: dict[str, Any], fields: list[str]) -> dict[str, Any]:
 
 
 def upsert_profile(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    validate_nonnegative(payload)
     values = filtered(payload, PROFILE_FIELDS)
     if not values:
         raise ValueError("No valid profile fields")
     if "safety_reviewed" in values:
         values["safety_reviewed"] = as_bool(values["safety_reviewed"], "safety_reviewed")
+    if "timezone" in values:
+        validate_timezone(values["timezone"])
     now = utc_now()
     existing = conn.execute("SELECT 1 FROM profile WHERE id = 1").fetchone()
     with conn:
@@ -346,42 +408,70 @@ def replace_schedule(conn: sqlite3.Connection, payload: dict[str, Any]) -> list[
     items = payload.get("items")
     if not isinstance(items, list):
         raise ValueError("schedule payload requires an items array")
-    normalized: list[dict[str, Any]] = []
+    if "replace" not in payload:
+        raise ValueError("schedule payload requires explicit replace: true or false")
+    replace = bool(as_bool(payload["replace"], "replace"))
+    normalized: list[tuple[int | None, dict[str, Any]]] = []
     for item in items:
         if not isinstance(item, dict):
             raise ValueError("Each schedule item must be an object")
+        item_id = item.get("id")
+        if item_id is not None:
+            try:
+                item_id = int(item_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("schedule item id must be an integer") from exc
         row = filtered(item, SCHEDULE_FIELDS)
+        validate_nonnegative(row)
+        existing = None
+        if item_id is not None and not replace:
+            existing = conn.execute("SELECT * FROM schedule WHERE id=?", (item_id,)).fetchone()
+            if not existing:
+                raise ValueError(f"Unknown schedule id: {item_id}")
+        effective = dict(existing) if existing else {}
+        effective.update(row)
         for required in ("weekday", "local_time", "workout_name"):
-            if not row.get(required):
+            if not effective.get(required):
                 raise ValueError(f"Each schedule item requires {required}")
-        row["weekday"] = str(row["weekday"]).lower()
-        if row["weekday"] not in WEEKDAYS:
-            raise ValueError(f"Unknown weekday: {row['weekday']}")
-        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(row["local_time"])):
-            raise ValueError(f"Invalid local_time: {row['local_time']}")
-        row["enabled"] = as_bool(row.get("enabled", True), "enabled")
-        normalized.append(row)
+        weekday = str(effective["weekday"]).lower()
+        if weekday not in WEEKDAYS:
+            raise ValueError(f"Unknown weekday: {weekday}")
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(effective["local_time"])):
+            raise ValueError(f"Invalid local_time: {effective['local_time']}")
+        if "weekday" in row:
+            row["weekday"] = weekday
+        if "timezone" in row:
+            validate_timezone(row["timezone"], "schedule.timezone")
+        if "enabled" in row:
+            row["enabled"] = as_bool(row["enabled"], "enabled")
+        elif item_id is None:
+            row["enabled"] = 1
+        normalized.append((item_id, row))
 
     now = utc_now()
     with conn:
-        if payload.get("replace", True):
+        if replace:
             conn.execute("DELETE FROM schedule")
-        for row in normalized:
-            columns = [*row, "created_at", "updated_at"]
-            values = [*row.values(), now, now]
-            updates = ",".join(
-                f"{key}=excluded.{key}" for key in row if key not in {"weekday", "local_time", "workout_name"}
-            )
-            if updates:
-                conflict = f"DO UPDATE SET {updates},updated_at=excluded.updated_at"
+        for item_id, row in normalized:
+            if item_id is not None and not replace:
+                if row:
+                    assignments = ",".join(f"{key}=?" for key in row)
+                    conn.execute(
+                        f"UPDATE schedule SET {assignments},updated_at=? WHERE id=?",
+                        [*row.values(), now, item_id],
+                    )
+                else:
+                    conn.execute("UPDATE schedule SET updated_at=? WHERE id=?", (now, item_id))
             else:
-                conflict = "DO UPDATE SET updated_at=excluded.updated_at"
-            conn.execute(
-                f"INSERT INTO schedule ({','.join(columns)}) "
-                f"VALUES ({','.join('?' for _ in columns)}) "
-                f"ON CONFLICT(weekday,local_time,workout_name) {conflict}",
-                values,
-            )
+                values = dict(row)
+                if item_id is not None:
+                    values = {"id": item_id, **values}
+                columns = [*values, "created_at", "updated_at"]
+                conn.execute(
+                    f"INSERT INTO schedule ({','.join(columns)}) "
+                    f"VALUES ({','.join('?' for _ in columns)})",
+                    [*values.values(), now, now],
+                )
     return schedule_rows(conn)
 
 
@@ -415,6 +505,7 @@ def create_session(conn: sqlite3.Connection, payload: dict[str, Any]) -> str:
         raise ValueError("Starting a workout requires session.date")
     validate_date(payload["date"], "session.date")
     validate_ratings(payload)
+    validate_nonnegative(payload)
     sid = session_id(payload)
     now = utc_now()
     values = filtered(payload, SESSION_FIELDS)
@@ -444,6 +535,7 @@ def add_sets(conn: sqlite3.Connection, exercise_id: int, items: list[dict[str, A
         if not isinstance(item, dict):
             raise ValueError("Each set must be an object")
         validate_ratings(item)
+        validate_nonnegative(item)
         row = filtered(item, SET_FIELDS)
         row["set_number"] = item.get("set_number") or maximum + index
         if "bodyweight" in row:
@@ -462,12 +554,25 @@ def record_exercise(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict[s
     if not isinstance(exercise, dict) or not exercise.get("name"):
         raise ValueError("Payload requires exercise.name")
     validate_ratings(exercise)
+    validate_nonnegative(exercise)
     session_payload = payload.get("session") or {}
     if not isinstance(session_payload, dict):
         raise ValueError("session must be an object")
     with conn:
         active = active_session(conn)
         started = active is None
+        if active is not None:
+            checks = {
+                "id": session_payload.get("id"),
+                "date": session_payload.get("date"),
+                "planned_name": session_payload.get("planned_name"),
+            }
+            for field, incoming in checks.items():
+                if incoming is not None and active[field] is not None and str(incoming) != str(active[field]):
+                    raise ValueError(
+                        f"Active workout {active['id']} has {field}={active[field]!r}, "
+                        f"but the report has {incoming!r}; finish or correct the active workout first"
+                    )
         sid = create_session(conn, session_payload) if started else str(active["id"])
         position = exercise.get("position")
         if position is None:
@@ -511,6 +616,7 @@ def update_exercise(conn: sqlite3.Connection, exercise_id: int, payload: dict[st
     if not isinstance(exercise, dict):
         raise ValueError("exercise must be an object")
     validate_ratings(exercise)
+    validate_nonnegative(exercise)
     changes = filtered(exercise, [field for field in EXERCISE_FIELDS if field != "position"])
     set_updates = payload.get("sets") or []
     with conn:
@@ -524,6 +630,7 @@ def update_exercise(conn: sqlite3.Connection, exercise_id: int, payload: dict[st
             if not isinstance(item, dict) or item.get("set_number") is None:
                 raise ValueError("Each set update requires set_number")
             validate_ratings(item)
+            validate_nonnegative(item)
             update = filtered(item, [field for field in SET_FIELDS if field != "set_number"])
             if not update:
                 continue
@@ -556,13 +663,15 @@ def finish_session(conn: sqlite3.Connection, payload: dict[str, Any]) -> str:
     if not current:
         raise ValueError("No workout is currently in progress")
     validate_ratings(payload)
+    validate_nonnegative(payload)
     changes = filtered(payload, SESSION_FIELDS)
     changes.pop("status", None)
+    raw_report = changes.pop("raw_report", None)
     changes["status"] = "completed"
     changes["finished_at"] = payload.get("finished_at") or payload.get("local_datetime") or utc_now()
     changes["updated_at"] = utc_now()
-    if payload.get("raw_report"):
-        changes["raw_report"] = append_text(current["raw_report"], payload["raw_report"])
+    if raw_report:
+        changes["raw_report"] = append_text(current["raw_report"], raw_report)
     assignments = ",".join(f"{key}=?" for key in changes)
     with conn:
         conn.execute(
@@ -576,6 +685,7 @@ def update_session(
     conn: sqlite3.Connection, sid: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
     validate_ratings(payload)
+    validate_nonnegative(payload)
     changes = filtered(payload, SESSION_FIELDS)
     changes.pop("status", None)
     if not changes:
@@ -604,6 +714,7 @@ def record_checkin(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict[st
         raise ValueError("checkin requires date")
     validate_date(payload["date"], "checkin.date")
     validate_ratings(payload)
+    validate_nonnegative(payload)
     values = filtered(payload, CHECKIN_FIELDS)
     values.setdefault("kind", "general")
     if values.get("session_id") and not conn.execute(
@@ -617,7 +728,12 @@ def record_checkin(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict[st
             f"VALUES ({','.join('?' for _ in columns)})",
             [*values.values(), utc_now()],
         )
-        if values.get("session_id") and values.get("kind") in {"next_day", "morning"}:
+        if (
+            values.get("session_id")
+            and values.get("kind") in {"next_day", "morning"}
+            and "discomfort" in values
+            and values["discomfort"] is not None
+        ):
             conn.execute(
                 "UPDATE sessions SET discomfort_next_day=?,updated_at=? WHERE id=?",
                 (values.get("discomfort"), utc_now(), values["session_id"]),
@@ -628,14 +744,16 @@ def record_checkin(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict[st
 
 
 def write_csv(path: Path, rows: list[sqlite3.Row]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     if not rows:
         path.write_text("", encoding="utf-8")
+        path.chmod(0o600)
         return
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
         writer.writeheader()
         writer.writerows(dict(row) for row in rows)
+    path.chmod(0o600)
 
 
 def export_csv(conn: sqlite3.Connection, out_dir: Path) -> dict[str, Any]:
@@ -664,9 +782,7 @@ def export_csv(conn: sqlite3.Connection, out_dir: Path) -> dict[str, Any]:
 
 
 def stats(conn: sqlite3.Connection, days: int) -> dict[str, Any]:
-    if days < 1:
-        raise ValueError("days must be at least 1")
-    modifier = f"-{days - 1} days"
+    start_date, end_date = report_window(conn, days)
     base = dict(
         conn.execute(
             """
@@ -680,9 +796,9 @@ def stats(conn: sqlite3.Connection, days: int) -> dict[str, Any]:
                    ROUND(AVG(energy_before),2) AS avg_energy_before,
                    ROUND(AVG(energy_after),2) AS avg_energy_after,
                    ROUND(AVG(sleep_hours),2) AS avg_sleep_hours
-            FROM sessions WHERE date >= date('now', ?)
+            FROM sessions WHERE date BETWEEN ? AND ?
             """,
-            (modifier,),
+            (start_date, end_date),
         ).fetchone()
     )
     base["days"] = days
@@ -691,15 +807,15 @@ def stats(conn: sqlite3.Connection, days: int) -> dict[str, Any]:
     ).fetchone()[0]
     base["exercise_rows"] = conn.execute(
         "SELECT COUNT(*) FROM exercises e JOIN sessions s ON s.id=e.session_id "
-        "WHERE s.date >= date('now', ?)",
-        (modifier,),
+        "WHERE s.date BETWEEN ? AND ?",
+        (start_date, end_date),
     ).fetchone()[0]
     base["set_rows"] = conn.execute(
         "SELECT COUNT(*) FROM exercise_sets x "
         "JOIN exercises e ON e.id=x.exercise_id "
         "JOIN sessions s ON s.id=e.session_id "
-        "WHERE s.date >= date('now', ?)",
-        (modifier,),
+        "WHERE s.date BETWEEN ? AND ?",
+        (start_date, end_date),
     ).fetchone()[0]
     current = active_session(conn)
     base["active_session"] = dict(current) if current else None
@@ -707,13 +823,11 @@ def stats(conn: sqlite3.Connection, days: int) -> dict[str, Any]:
 
 
 def recent(conn: sqlite3.Connection, days: int) -> dict[str, Any]:
-    if days < 1:
-        raise ValueError("days must be at least 1")
-    modifier = f"-{days - 1} days"
+    start_date, end_date = report_window(conn, days)
     session_rows = conn.execute(
-        "SELECT * FROM sessions WHERE date >= date('now', ?) "
+        "SELECT * FROM sessions WHERE date BETWEEN ? AND ? "
         "ORDER BY date DESC,started_at DESC,id DESC",
-        (modifier,),
+        (start_date, end_date),
     ).fetchall()
     sessions: list[dict[str, Any]] = []
     for session in session_rows:
@@ -739,8 +853,8 @@ def recent(conn: sqlite3.Connection, days: int) -> dict[str, Any]:
     checkins = [
         dict(row)
         for row in conn.execute(
-            "SELECT * FROM checkins WHERE date >= date('now', ?) ORDER BY date DESC,id DESC",
-            (modifier,),
+            "SELECT * FROM checkins WHERE date BETWEEN ? AND ? ORDER BY date DESC,id DESC",
+            (start_date, end_date),
         ).fetchall()
     ]
     return {"days": days, "sessions": sessions, "checkins": checkins}
@@ -782,9 +896,10 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     try:
-        conn = connect(args.db)
+        db_path = ensure_safe_path(args.db, "--db")
+        conn = connect(db_path)
         if args.command == "init":
-            result: dict[str, Any] = {"db": str(args.db)}
+            result: dict[str, Any] = {"db": str(db_path)}
         elif args.command == "profile":
             result = {"profile": upsert_profile(conn, load_payload(args.json_file))}
         elif args.command == "profile-show":
@@ -813,7 +928,7 @@ def main() -> int:
         elif args.command == "recent":
             result = recent(conn, args.days)
         elif args.command == "export":
-            result = export_csv(conn, args.out)
+            result = export_csv(conn, ensure_safe_path(args.out, "--out"))
         else:
             raise ValueError(f"Unsupported command: {args.command}")
         output({"status": "ok", **result})
