@@ -1,6 +1,6 @@
 # hermes-skills
 
-Навыки для [Hermes Agent](https://github.com/nousresearch/hermes-agent).
+Навыки для агентов [@agentmakerrbot](https://t.me/agentmakerrbot).
 
 ## Структура
 
