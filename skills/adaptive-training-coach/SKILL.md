@@ -1,7 +1,7 @@
 ---
 name: adaptive-training-coach
-description: "Вести тренировки, отчёты и безопасную прогрессию."
-version: 1.0.3
+description: "Обязателен для любого разговора о тренировках, занятиях, зале, упражнениях, форме и нагрузке: интервью, план, расписание, напоминания, журнал и прогрессия. Открой до того, как отвечать: план и журнал ведутся только через него, в SQLite, а не в чате и не в Markdown."
+version: 1.1.0
 author: Sergey Klyukin (sklukin), Hermes Agent
 license: MIT
 platforms: [linux]
