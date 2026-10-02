@@ -31,7 +31,12 @@ fi
 
 API_KEY=$(cat "$KEY_FILE")
 # Адрес бота фиксирован сетевым правилом: только сервер бота, только порт API.
-API_URL="http://192.168.1.50:8105"
+API_URL_FILE="/etc/agent-apps/api-url"
+if [[ ! -r "$API_URL_FILE" ]]; then
+    echo "ОШИБКА: $API_URL_FILE не читается — веб-приложения не раскатаны." >&2
+    exit 1
+fi
+API_URL=$(cat "$API_URL_FILE")
 
 LOCK_FILE="/run/agent-apps.lock"
 APPS_DIR="/opt/agent-apps"
