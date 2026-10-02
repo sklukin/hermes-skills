@@ -94,7 +94,14 @@ sudo mkdir -p "$APP_DIR/static"
 sudo cp "$SKILL_DIR/template/static/index.html" "$APP_DIR/static/index.html"
 
 # Venv с зафиксированными версиями: повтор — no-op, обрыв — безопасный повтор.
+# python3-venv отсутствует в шаблоне VM (шаблон не пересобирается) — ставим сами:
+# без ensurepip venv создаётся пустым и pip в нём нет.
 if [ ! -d "$APP_DIR/venv" ]; then
+    if ! python3 -m venv --help >/dev/null 2>&1 || ! python3 -c "import ensurepip" 2>/dev/null; then
+        echo "Установка python3-venv (отсутствует в шаблоне)…"
+        sudo apt-get install -y -qq "python3$(python3 -c 'import sys; print(f".{sys.version_info.major}.{sys.version_info.minor}")')-venv" >/dev/null 2>&1 ||         sudo apt-get install -y -qq python3-venv >/dev/null 2>&1 || true
+    fi
+
     echo "Сборка окружения (30-60 секунд)…"
     sudo python3 -m venv "$APP_DIR/venv"
     sudo "$APP_DIR/venv/bin/pip" install --quiet --no-input -r "$APP_DIR/requirements.txt"
