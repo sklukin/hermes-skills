@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#
+# remove-app — остановить и удалить веб-приложение по имени.
+#
+# Под flock: остановка юнита и разбор каталогов — VM-сторона; DELETE у бота —
+# до flock (строка переходит в deleting, порт держится до финальной зачистки
+# воркером, который доведёт и машинную часть, если скрипт не успел).
+set -euo pipefail
+
+NAME="${1:-}"
+
+if [[ -z "$NAME" ]]; then
+    echo "Использование: $0 <имя>" >&2
+    exit 1
+fi
+
+KEY_FILE="/etc/agent-apps/key"
+if [[ ! -r "$KEY_FILE" ]]; then
+    echo "ОШИБКА: $KEY_FILE не читается." >&2
+    exit 1
+fi
+
+API_KEY=$(cat "$KEY_FILE")
+API_URL="http://192.168.1.50:8105"
+LOCK_FILE="/run/agent-apps.lock"
+APPS_DIR="/opt/agent-apps"
+
+# --- найти id по имени ---
+APPS=$(curl -sf "$API_URL/apps" -H "Authorization: Bearer $API_KEY") || {
+    echo "ОШИБКА: бот не ответил." >&2
+    exit 1
+}
+
+INFO=$(echo "$APPS" | python3 -c "
+import json, sys
+for a in json.load(sys.stdin):
+    if a['name'] == '$NAME':
+        print(f\"{a['id']} {a['status']}\")
+        break
+else:
+    print('NOT_FOUND')
+" 2>/dev/null)
+
+if [[ "$INFO" == "NOT_FOUND" ]]; then
+    echo "Приложение «$NAME» не найдено среди действующих." >&2
+    list-apps 2>/dev/null || true
+    exit 1
+fi
+
+APP_ID=$(echo "$INFO" | cut -d' ' -f1)
+STATUS=$(echo "$INFO" | cut -d' ' -f2)
+UNIT_NAME="agentapp-${APP_ID}"
+UNIT_FILE="/etc/systemd/system/${UNIT_NAME}.service"
+APP_DIR="${APPS_DIR}/${APP_ID}"
+
+echo "Удаляю «$NAME» (id=$APP_ID, статус $STATUS)…"
+
+# --- DELETE у бота: до flock ---
+if [ "$STATUS" = "active" ]; then
+    CODE=$(curl -sf -o /dev/null -w '%{http_code}' \
+        -X DELETE "$API_URL/apps/$APP_ID" \
+        -H "Authorization: Bearer $API_KEY") || CODE="error"
+
+    if [[ "$CODE" != "204" && "$CODE" != "404" ]]; then
+        echo "ОШИБКА: бот отклонил удаление (HTTP $CODE)." >&2
+        exit 1
+    fi
+fi
+
+# --- VM-сторона под flock ---
+exec 9>"$LOCK_FILE"
+flock -w 30 9
+
+sudo systemctl stop "$UNIT_NAME" 2>/dev/null || true
+sudo systemctl disable "$UNIT_NAME" 2>/dev/null || true
+sudo rm -f "$UNIT_FILE"
+sudo rm -rf "$APP_DIR"
+sudo rm -rf "/var/lib/agent-apps/$APP_ID"
+sudo systemctl daemon-reload
+
+echo "Приложение «$NAME» удалено. Ссылка перестала открываться."

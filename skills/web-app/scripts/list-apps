@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# list-apps — действующие веб-приложения машины: имя, статус, ссылка.
+# GET /apps — lock-free: не берёт flock, не пишет на машину.
+set -euo pipefail
+
+KEY_FILE="/etc/agent-apps/key"
+if [[ ! -r "$KEY_FILE" ]]; then
+    echo "Веб-приложения не раскатаны на эту машину (нет $KEY_FILE)." >&2
+    echo "Попросите владельца включить их в боте." >&2
+    exit 0
+fi
+
+API_KEY=$(cat "$KEY_FILE")
+API_URL="http://192.168.1.50:8105"
+
+APPS=$(curl -sf "$API_URL/apps" -H "Authorization: Bearer $API_KEY") || {
+    echo "ОШИБКА: бот не ответил." >&2
+    exit 1
+}
+
+echo "$APPS" | python3 -c "
+import json, sys
+apps = json.load(sys.stdin)
+if not apps:
+    print('Приложений нет.')
+    sys.exit(0)
+
+for a in apps:
+    status = a.get('status', '?')
+    mark = '🟢' if status == 'active' else '🧹'
+    print(f\"{mark} {a['name']} — {status}\")
+    print(f\"   {a.get('url', '(ссылка не выдана)')}\")
+    print()
+"

@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+#
+# new-app — зарегистрировать, собрать и запустить веб-приложение.
+#
+# Порядок из плана 2026-09-26-agent-webapps §2/§6:
+#   1. POST /apps — ДО взятия flock (порты и записи распределяет бот)
+#   2. Сборка (venv, каталог) — под flock /run/agent-apps.lock
+#   3. Перепроверка id у бота — под тем же flock, ПЕРЕД start:
+#      удаление, пришедшее за время постройки, не оживит приложение
+#   4. systemd-юнит DynamicUser=yes + health-проверка
+#
+# Ссылка печатается ТОЛЬКО после успешной health-проверки.
+
+set -euo pipefail
+
+NAME="${1:-}"
+
+# --- валидация имени (сервис повторит, но ошибка здесь дешевле) ---
+if [[ -z "$NAME" || ! "$NAME" =~ ^[a-z0-9-]{1,32}$ ]]; then
+    echo "ОШИБКА: имя — строчные латиница, цифры и дефис, до 32 знаков: $NAME" >&2
+    exit 1
+fi
+
+# --- ключ регистрации и адрес API ---
+KEY_FILE="/etc/agent-apps/key"
+if [[ ! -r "$KEY_FILE" ]]; then
+    echo "ОШИБКА: $KEY_FILE не читается — веб-приложения не раскатаны на эту машину." >&2
+    echo "Попросите владельца: «🌐 Приложения» в боте или /admin_webapps_rollout у админа." >&2
+    exit 1
+fi
+
+API_KEY=$(cat "$KEY_FILE")
+# Адрес бота фиксирован сетевым правилом: только сервер бота, только порт API.
+API_URL="http://192.168.1.50:8105"
+
+LOCK_FILE="/run/agent-apps.lock"
+APPS_DIR="/opt/agent-apps"
+
+# --- 1. регистрация: ДО flock ---
+# Повтор имени идемпотентен: 409 + существующая запись — тот же id и порт.
+REG=$(curl -sf -w '\n%{http_code}' -X POST "$API_URL/apps" \
+    -H "Authorization: Bearer $API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"$NAME\"}") || {
+    echo "ОШИБКА: бот не ответил на регистрацию. Проверьте оплату периода." >&2
+    exit 1
+}
+
+HTTP_CODE=$(echo "$REG" | tail -1)
+BODY=$(echo "$REG" | sed '$d')
+
+if [[ "$HTTP_CODE" == "409" ]]; then
+    # Существующее: берём поля из ответа (existed=true).
+    APP_ID=$(echo "$BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' 2>/dev/null) || {
+        echo "ОШИБКА: не удалось разобрать ответ бота: $BODY" >&2
+        exit 1
+    }
+elif [[ "$HTTP_CODE" == "201" ]]; then
+    APP_ID=$(echo "$BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["id"])' 2>/dev/null) || {
+        echo "ОШИБКА: не удалось разобрать ответ бота: $BODY" >&2
+        exit 1
+    }
+else
+    echo "ОШИБКА: регистрация отклонена (HTTP $HTTP_CODE): $BODY" >&2
+    echo "Возможно: лимит приложений, нет оплаченного периода или имя занято." >&2
+    exit 1
+fi
+
+PORT=$(echo "$BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["port"])')
+BASE_PATH=$(echo "$BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["base_path"])')
+URL=$(echo "$BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["url"])')
+
+UNIT_NAME="agentapp-${APP_ID}"
+UNIT_FILE="/etc/systemd/system/${UNIT_NAME}.service"
+APP_DIR="${APPS_DIR}/${APP_ID}"
+
+echo "Зарегистрировано: id=$APP_ID порт=$PORT base_path=$BASE_PATH"
+
+# --- 2. сборка под flock ---
+exec 9>"$LOCK_FILE"
+flock -w 30 9
+
+# Каталог приложения: код и venv, root-владелец, процессу — только чтение.
+sudo mkdir -p "$APP_DIR"
+SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+sudo cp "$SKILL_DIR/template/main.py" "$APP_DIR/main.py"
+sudo cp "$SKILL_DIR/template/requirements.txt" "$APP_DIR/requirements.txt"
+sudo mkdir -p "$APP_DIR/static"
+sudo cp "$SKILL_DIR/template/static/index.html" "$APP_DIR/static/index.html"
+
+# Venv с зафиксированными версиями: повтор — no-op, обрыв — безопасный повтор.
+if [ ! -d "$APP_DIR/venv" ]; then
+    echo "Сборка окружения (30-60 секунд)…"
+    sudo python3 -m venv "$APP_DIR/venv"
+    sudo "$APP_DIR/venv/bin/pip" install --quiet --no-input -r "$APP_DIR/requirements.txt"
+fi
+
+# --- 3. перепроверка под flock, ПЕРЕД start ---
+# Удаление, пришедшее за время постройки: бот уже перевёл строку в deleting или удалил.
+STATUS=$(curl -sf "$API_URL/apps" \
+    -H "Authorization: Bearer $API_KEY" | \
+    python3 -c "
+import json, sys
+apps = json.load(sys.stdin)
+for a in apps:
+    if a['id'] == $APP_ID:
+        print(a['status'])
+        break
+else:
+    print('gone')
+" 2>/dev/null) || STATUS="unknown"
+
+if [[ "$STATUS" != "active" ]]; then
+    echo "ОШИБКА: приложение $NAME (id=$APP_ID) уже '$STATUS' — удалено или удаляется." >&2
+    echo "Не запускаю. Если владелец передумал — повторите создание." >&2
+    exit 1
+fi
+
+# --- 4. systemd-юнит ---
+# DynamicUser=yes: свой uid и StateDirectory на каждое приложение, без sudo.
+# Один worker Uvicorn, --root-path для проброса префикса /app/<id>/.
+sudo tee "$UNIT_FILE" > /dev/null <<EOF
+[Unit]
+Description=Agent web application $NAME (id=$APP_ID)
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=agent-apps/$APP_ID
+Slice=agentapps.slice
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT --root-path "$BASE_PATH" --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=5s
+
+# Sandbox: только своё, без сети на хост (ufw закрывает), без привилегий.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=true
+PrivateDevices=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Slice для лимитов — если его ещё нет (раскатка могла не создать).
+if ! systemctl is-active agentapps.slice >/dev/null 2>&1; then
+    sudo tee /etc/systemd/system/agentapps.slice > /dev/null <<'EOF'
+[Unit]
+Description=Resource limits for agent web applications
+
+[Slice]
+CPUQuota=100%
+MemoryMax=512M
+MemorySwapMax=0
+TasksMax=128
+EOF
+fi
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now "$UNIT_NAME"
+
+# --- health-проверка: localhost:<port>/app-health, ограниченное время ---
+HEALTH_URL="http://127.0.0.1:${PORT}/app-health"
+TIMEOUT=30
+ELAPSED=0
+
+echo -n "Ожидание здоровья приложения"
+while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+    if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+        echo " — OK"
+        echo ""
+        echo "Приложение «$NAME» опубликовано."
+        echo "Ссылка: $URL"
+        echo ""
+        echo "Отдайте ссылку владельцу — её откроет кто угодно."
+        exit 0
+    fi
+    echo -n "."
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+
+echo " — НЕ ОТВЕЧАЕТ" >&2
+echo "ОШИБКА: приложение не прошло health-проверку за ${TIMEOUT}с." >&2
+echo "Журнал: sudo journalctl -u $UNIT_NAME --no-pager -n 20" >&2
+echo "Ссылку НЕ выдавайте. Почините приложение и повторите." >&2
+exit 1
