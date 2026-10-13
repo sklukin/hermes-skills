@@ -387,11 +387,31 @@ class ConfigResolution(LoopbackServerTestCase):
         self.assertIn("SEARXNG_BASE_URL", payload["error"])
         self.assertEqual(len(self.state.requests), 0)
 
-    def test_missing_everything_is_clear_message(self):
-        proc = run_client(["--json", "query"], home=self.home)
-        self.assertNotEqual(proc.returncode, 0)
-        payload = json.loads(proc.stdout)
-        self.assertIn("no SearXNG configuration", payload["error"])
+    def test_missing_everything_falls_back_to_builtin_default(self):
+        # Ни env, ни конфига: base_url() возвращает встроенный дефолт оператора,
+        # без сети (модуль импортируется и разрешается локально).
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import importlib.util as u\n"
+                f"s = u.spec_from_file_location('search', {str(SCRIPT)!r})\n"
+                "m = u.module_from_spec(s)\n"
+                "s.loader.exec_module(m)\n"
+                "print(m.base_url())\n",
+            ],
+            capture_output=True,
+            text=True,
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if key.lower() not in PROXY_ENV_KEYS
+            }
+            | {"HOME": self.home},
+            timeout=30,
+        )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertEqual(probe.stdout.strip(), "http://10.31.0.1:8888")
 
     def test_broken_json_config_is_error(self):
         self.config_dir.mkdir(parents=True, exist_ok=True)

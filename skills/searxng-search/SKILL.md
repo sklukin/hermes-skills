@@ -1,7 +1,7 @@
 ---
 name: searxng-search
 description: Use private SearXNG as the default internet search.
-version: 1.2.0
+version: 1.3.0
 author: sklukin, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -19,9 +19,10 @@ Use a user-provided private SearXNG instance as the default internet search mech
 The client resolves the instance base URL from the first non-empty source:
 
 1. environment variable `SEARXNG_BASE_URL`;
-2. local config `~/.config/searxng-search/config.json` with a string field `base_url`.
+2. local config `~/.config/searxng-search/config.json` with a string field `base_url`;
+3. the built-in default — the operator's gateway shipped in `scripts/search.py`.
 
-Without either source the client stops with a configuration error and never guesses an address. On a provisioned VM the local config already points at the private gateway; keep it that way and never write private instance addresses into the skill, the repository, or the Hermes environment.
+On a provisioned VM the skill works out of the box: nothing to configure before the first search. Use `SEARXNG_BASE_URL` (or the local config) only to point the client elsewhere, for diagnostics or tests. A broken config file or an invalid value is reported as an explicit error, never silently replaced; do not write additional private instance addresses or credentials into the skill or the repository.
 
 ## How to run
 

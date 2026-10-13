@@ -21,6 +21,12 @@ ENV_VAR = "SEARXNG_BASE_URL"
 CONFIG_RELATIVE_PATH = os.path.join(".config", "searxng-search", "config.json")
 RETRY_HINT_SECONDS = 30
 
+# Встроенный дефолт — шлюз оператора на сети агентских VM. Не маршрутизируется
+# извне этой сети и не несёт авторизации; опубликован осознанно (исключение
+# из правила «никаких адресов внутренних систем», README). Переопределяется
+# env SEARXNG_BASE_URL или локальным config.json, см. base_url().
+DEFAULT_BASE_URL = "http://10.31.0.1:8888"
+
 
 class ConfigError(Exception):
     """base_url отсутствует или некорректен: стоп до любого сетевого вызова."""
@@ -87,11 +93,11 @@ def base_url() -> str:
     try:
         with open(config_path, encoding="utf-8") as handle:
             payload = json.load(handle)
-    except FileNotFoundError as exc:
-        raise ConfigError(
-            f"no SearXNG configuration found: set {ENV_VAR} or create "
-            f'{config_path} with {{"base_url": "http://host:port"}}'
-        ) from exc
+    except FileNotFoundError:
+        # Нет ни env, ни конфига — работает встроенный дефолт оператора:
+        # новая VM получает рабочий поиск сразу после установки скилла.
+        # Повреждённый конфиг остаётся явной ошибкой, а не молчаливым откатом.
+        return _validated(DEFAULT_BASE_URL, "built-in default")
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ConfigError(f"cannot read configuration {config_path}: {exc}") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("base_url"), str):
