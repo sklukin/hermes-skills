@@ -1,7 +1,7 @@
 ---
-name: private-searxng-search
+name: searxng-search
 description: Use private SearXNG as the default internet search.
-version: 1.0.0
+version: 1.1.0
 author: sklukin, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -10,7 +10,7 @@ metadata:
     tags: [web, search, searxng]
 ---
 
-# Private SearXNG Search
+# SearXNG Search
 
 Use a user-provided private SearXNG instance as the default internet search mechanism. Report real results and upstream failures without silently substituting another search provider.
 
