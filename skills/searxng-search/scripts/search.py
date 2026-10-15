@@ -27,6 +27,10 @@ RETRY_HINT_SECONDS = 30
 # env SEARXNG_BASE_URL или локальным config.json, см. base_url().
 DEFAULT_BASE_URL = "http://10.31.0.1:8888"
 
+# Платные движки (Yandex Cloud Search API: 488₽/1000 дневных запросов,
+# ночью 00:00-08:00 МСК — 366₽). Запрашиваются только явным --engines.
+PAID_ENGINES = frozenset({"yandex api"})
+
 
 class ConfigError(Exception):
     """base_url отсутствует или некорректен: стоп до любого сетевого вызова."""
@@ -285,7 +289,11 @@ def main() -> int:
     parser.add_argument("query", nargs="?", help="one meaningful search query")
     parser.add_argument("--language", choices=("en", "ru"), default="en")
     parser.add_argument("--pageno", type=int, default=1)
-    parser.add_argument("--engines", choices=("braveapi",))
+    parser.add_argument(
+        "--engines",
+        choices=("braveapi", "yandex api"),
+        help="pin the search to one engine; 'yandex api' is paid per request",
+    )
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--health", action="store_true")
     args = parser.parse_args()
@@ -347,11 +355,14 @@ def main() -> int:
         }
         for item in raw_results
     ]
+    paid_engine = args.engines in PAID_ENGINES
     output = {
         "status": status,
         "base_url": base,
         "query": query_echo or args.query,
         "language": args.language,
+        "engines": args.engines or "default",
+        "paid_engine": paid_engine,
         "results": results,
         "unresponsive_engines": unresponsive,
     }
@@ -362,6 +373,11 @@ def main() -> int:
 
     print(f"POST {endpoint} -> HTTP {status}")
     print(f"Query: {output['query']} (language={args.language}, pageno={args.pageno})")
+    if paid_engine:
+        print(
+            "Paid engine: results come from a metered engine "
+            "(~0.49 RUB per daytime request); mention this in the answer."
+        )
     if results:
         for index, item in enumerate(results, 1):
             print(f"\n{index}. {item['title'] or '[no title]'}")
@@ -377,4 +393,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:
+        # Потребитель закрыл pipe (head/less): не ошибка поиска и не трейсбек.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        raise SystemExit(141) from None

@@ -216,6 +216,29 @@ class SearchBehavior(LoopbackServerTestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertNotIn("engines", self.posts()[0]["form"])
 
+    def test_engines_yandex_api_is_sent_and_marked_paid(self):
+        proc = run_client(["--json", "--engines", "yandex api", "test"], base=self.base_url)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.posts()[0]["form"].get("engines"), "yandex api")
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["paid_engine"])
+        self.assertEqual(payload["engines"], "yandex api")
+        text = run_client(["--engines", "yandex api", "test"], base=self.base_url)
+        self.assertEqual(text.returncode, 0, text.stderr)
+        self.assertIn("Paid engine", text.stdout)
+
+    def test_default_and_braveapi_are_not_marked_paid(self):
+        default = run_client(["--json", "test"], base=self.base_url)
+        self.assertEqual(default.returncode, 0, default.stderr)
+        payload = json.loads(default.stdout)
+        self.assertFalse(payload["paid_engine"])
+        self.assertEqual(payload["engines"], "default")
+        brave = run_client(["--json", "--engines", "braveapi", "test"], base=self.base_url)
+        self.assertEqual(brave.returncode, 0, brave.stderr)
+        payload = json.loads(brave.stdout)
+        self.assertFalse(payload["paid_engine"])
+        self.assertEqual(payload["engines"], "braveapi")
+
     def test_rejects_empty_query_and_bad_pageno_before_network(self):
         proc = run_client(["--json", ""], base=self.base_url)
         self.assertNotEqual(proc.returncode, 0)

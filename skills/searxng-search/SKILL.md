@@ -1,7 +1,7 @@
 ---
 name: searxng-search
 description: Use private SearXNG as the default internet search.
-version: 1.3.0
+version: 1.4.0
 author: sklukin, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -36,7 +36,7 @@ Options:
 
 - `--language en|ru` (default: `en`)
 - `--pageno N` (default: `1`)
-- `--engines braveapi` to pin the search to the managed engine
+- `--engines braveapi|"yandex api"` to pin the search to one engine; quote the second value — the name contains a space
 - `--json` for structured output
 - `--health` to check only `/healthz`
 
@@ -51,20 +51,31 @@ The client:
 
 `/healthz` is a one-shot precheck or diagnostic, not part of every search: HTTP 200 proves only that SearXNG itself is running, not that upstream engines answer.
 
+## Engine tiers and cost
+
+| Tier | How | Cost | When |
+|---|---|---|---|
+| Free merge | no flag | free | default choice for every search |
+| Stable core | `--engines braveapi` | free within the shared monthly quota | deterministic results without scraping noise |
+| RU core | `--engines "yandex api"` | **paid**: ~0.49 ₽ per daytime request (488 ₽/1000), ~0.37 ₽ at night 00:00–08:00 MSK; auth/5xx errors are not billed | only when the free tier demonstrably fails on a Russian-language topic |
+
+The paid engine is never queried implicitly: it participates only when pinned explicitly. The client marks such runs with `paid_engine: true` (JSON) or a `Paid engine:` line (text) — carry that mark into the answer, so the user knows the query cost money.
+
 ## Procedure
 
 1. Form one meaningful query; preserve operators such as `site:`.
-2. Run the client once with the requested result language.
-3. On any failure, report the error to the user immediately, including the endpoint and the HTTP status the client printed. Retry only on an explicit user request: at most one retry per user task, not earlier than 30 seconds after the failure (a longer server `Retry-After` extends the wait). After that report the search as unavailable and stop.
-4. Empty results or suspended engines are valid responses, not failures and not reasons to retry.
-5. Do not work around a failure via a native web-search tool, another search service, another instance address, or query rephrasing; do not stand up a replacement (local SearXNG, Docker, new packages) just to satisfy this skill.
-6. A missing `scripts/search.py` or a configuration error means the install is broken: report it and stop instead of searching the filesystem for the address or the script.
-7. Include the source URL for every result used in the answer; cite only what the actual output contains.
-8. Fetch source pages separately only when the task needs verification beyond snippets.
+2. Pick the tier: start with the free merge; escalate to `--engines "yandex api"` only when the free results are insufficient for a Russian-language topic, never for routine or English queries.
+3. Run the client once with the requested result language.
+4. On any failure, report the error to the user immediately, including the endpoint and the HTTP status the client printed. Retry only on an explicit user request: at most one retry per user task, not earlier than 30 seconds after the failure (a longer server `Retry-After` extends the wait). After that report the search as unavailable and stop.
+5. Empty results or suspended engines are valid responses, not failures and not reasons to retry.
+6. Do not work around a failure via a native web-search tool, another search service, another instance address, or query rephrasing; do not stand up a replacement (local SearXNG, Docker, new packages) just to satisfy this skill.
+7. A missing `scripts/search.py` or a configuration error means the install is broken: report it and stop instead of searching the filesystem for the address or the script.
+8. Include the source URL for every result used in the answer; cite only what the actual output contains. When the run is marked paid, say so in the answer.
+9. Fetch source pages separately only when the task needs verification beyond snippets.
 
 ## Rate budget
 
-The private instance is shared by the whole fleet with a budget of about 1 request per second to the core and roughly 2000 requests per month in total. Run searches strictly one at a time: no batch queries, no parallel runs, no walking multiple pages.
+The private instance is shared by the whole fleet with a budget of about 1 request per second to the core and roughly 2000 requests per month in total. Run searches strictly one at a time: no batch queries, no parallel runs, no walking multiple pages. `yandex api` requests are metered in rubles on top of that quota — each one is a deliberate, user-visible expense.
 
 ## Pitfalls
 
@@ -74,6 +85,7 @@ The private instance is shared by the whole fleet with a budget of about 1 reque
 - Do not send JSON request bodies, omit `format=json`, or request other formats; the client always sends `format=json`.
 - Do not send secrets or private user data in queries.
 - Do not commit private SearXNG URLs, credentials, or internal network details.
+- Pin the paid engine only via `--engines "yandex api"`; do not put `!yda` into the query — bangs belong to manual API calls, the client pins engines by flag.
 
 ## Verification
 
