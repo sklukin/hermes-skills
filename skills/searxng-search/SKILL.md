@@ -1,7 +1,7 @@
 ---
 name: searxng-search
 description: Use private SearXNG as the default internet search.
-version: 1.4.0
+version: 1.4.1
 author: sklukin, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -36,7 +36,7 @@ Options:
 
 - `--language en|ru` (default: `en`)
 - `--pageno N` (default: `1`)
-- `--engines braveapi|"yandex api"` to pin the search to one engine; quote the second value — the name contains a space
+- `--engines braveapi|yandexapi` to pin the search to one engine
 - `--json` for structured output
 - `--health` to check only `/healthz`
 
@@ -57,14 +57,14 @@ The client:
 |---|---|---|---|
 | Free merge | no flag | free | default choice for every search |
 | Stable core | `--engines braveapi` | free within the shared monthly quota | deterministic results without scraping noise |
-| RU core | `--engines "yandex api"` | **paid**: ~0.49 ₽ per daytime request (488 ₽/1000), ~0.37 ₽ at night 00:00–08:00 MSK; auth/5xx errors are not billed | only when the free tier demonstrably fails on a Russian-language topic |
+| RU core | `--engines yandexapi` | **paid**: ~0.49 ₽ per daytime request (488 ₽/1000), ~0.37 ₽ at night 00:00–08:00 MSK; auth/5xx errors are not billed | only when the free tier demonstrably fails on a Russian-language topic |
 
 The paid engine is never queried implicitly: it participates only when pinned explicitly. The client marks such runs with `paid_engine: true` (JSON) or a `Paid engine:` line (text) — carry that mark into the answer, so the user knows the query cost money.
 
 ## Procedure
 
 1. Form one meaningful query; preserve operators such as `site:`.
-2. Pick the tier: start with the free merge; escalate to `--engines "yandex api"` only when the free results are insufficient for a Russian-language topic, never for routine or English queries.
+2. Pick the tier: start with the free merge; escalate to `--engines yandexapi` only when the free results are insufficient for a Russian-language topic, never for routine or English queries.
 3. Run the client once with the requested result language.
 4. On any failure, report the error to the user immediately, including the endpoint and the HTTP status the client printed. Retry only on an explicit user request: at most one retry per user task, not earlier than 30 seconds after the failure (a longer server `Retry-After` extends the wait). After that report the search as unavailable and stop.
 5. Empty results or suspended engines are valid responses, not failures and not reasons to retry.
@@ -75,7 +75,7 @@ The paid engine is never queried implicitly: it participates only when pinned ex
 
 ## Rate budget
 
-The private instance is shared by the whole fleet with a budget of about 1 request per second to the core and roughly 2000 requests per month in total. Run searches strictly one at a time: no batch queries, no parallel runs, no walking multiple pages. `yandex api` requests are metered in rubles on top of that quota — each one is a deliberate, user-visible expense.
+The private instance is shared by the whole fleet with a budget of about 1 request per second to the core and roughly 2000 requests per month in total. Run searches strictly one at a time: no batch queries, no parallel runs, no walking multiple pages. `yandexapi` requests are metered in rubles on top of that quota — each one is a deliberate, user-visible expense.
 
 ## Pitfalls
 
@@ -85,7 +85,7 @@ The private instance is shared by the whole fleet with a budget of about 1 reque
 - Do not send JSON request bodies, omit `format=json`, or request other formats; the client always sends `format=json`.
 - Do not send secrets or private user data in queries.
 - Do not commit private SearXNG URLs, credentials, or internal network details.
-- Pin the paid engine only via `--engines "yandex api"`; do not put `!yda` into the query — bangs belong to manual API calls, the client pins engines by flag.
+- Pin the paid engine only via `--engines yandexapi`; do not put `!yda` into the query — bangs belong to manual API calls, the client pins engines by flag.
 
 ## Verification
 

@@ -216,14 +216,14 @@ class SearchBehavior(LoopbackServerTestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertNotIn("engines", self.posts()[0]["form"])
 
-    def test_engines_yandex_api_is_sent_and_marked_paid(self):
-        proc = run_client(["--json", "--engines", "yandex api", "test"], base=self.base_url)
+    def test_engines_yandexapi_is_sent_and_marked_paid(self):
+        proc = run_client(["--json", "--engines", "yandexapi", "test"], base=self.base_url)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(self.posts()[0]["form"].get("engines"), "yandex api")
+        self.assertEqual(self.posts()[0]["form"].get("engines"), "yandexapi")
         payload = json.loads(proc.stdout)
         self.assertTrue(payload["paid_engine"])
-        self.assertEqual(payload["engines"], "yandex api")
-        text = run_client(["--engines", "yandex api", "test"], base=self.base_url)
+        self.assertEqual(payload["engines"], "yandexapi")
+        text = run_client(["--engines", "yandexapi", "test"], base=self.base_url)
         self.assertEqual(text.returncode, 0, text.stderr)
         self.assertIn("Paid engine", text.stdout)
 

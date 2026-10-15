@@ -29,7 +29,7 @@ DEFAULT_BASE_URL = "http://10.31.0.1:8888"
 
 # Платные движки (Yandex Cloud Search API: 488₽/1000 дневных запросов,
 # ночью 00:00-08:00 МСК — 366₽). Запрашиваются только явным --engines.
-PAID_ENGINES = frozenset({"yandex api"})
+PAID_ENGINES = frozenset({"yandexapi"})
 
 
 class ConfigError(Exception):
@@ -291,8 +291,8 @@ def main() -> int:
     parser.add_argument("--pageno", type=int, default=1)
     parser.add_argument(
         "--engines",
-        choices=("braveapi", "yandex api"),
-        help="pin the search to one engine; 'yandex api' is paid per request",
+        choices=("braveapi", "yandexapi"),
+        help="pin the search to one engine; yandexapi is paid per request",
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--health", action="store_true")
